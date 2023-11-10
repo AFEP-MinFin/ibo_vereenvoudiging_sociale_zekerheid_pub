@@ -1,0 +1,663 @@
+---
+title: "LISS Enquête-analyse: Ervaren complexiteit"
+author: "Romée Lind"
+date: "2022-12-01"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+```{r setup, echo = F, message = F, warning = F, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+
+
+#libraries inladen
+library(tidyr)
+library(dplyr)
+library(psych)
+library(ggplot2)
+library(randomForest)
+library(readxl)
+library(stargazer)
+library(plm)
+library(rpart)
+library(rpart.plot)
+library(broom)
+library(haven)
+library(formattable)
+library(caret)
+library(magrittr)
+library(ggrepel)
+
+set.seed(123456)
+setwd("O:/AFEP/Onderhanden werk/Romée Lind/Sociale Zekerheid/Enquête")
+source('scripts/make_df.R') 
+source('scripts/model_verg.R') 
+source('scripts/make_graphs.R')
+source('scripts/utils.R')
+source('scripts/obs_per_voorwaarde_tellen.R')
+
+#aanmaken formules
+formula_pm = as.formula('complexiteit ~ life + aantal_inkomstenbronnen + woonvorm + woning + oplmet + nettoink + Agreeableness + Conscientiousness + Extraversion + Neuroticism + OpennessExperience + stapeling')
+formula_beleid = as.formula('error_pm ~ inkomenstoets + gebaseerd_dagloon + vermogenstoets  + verrekening_gebruik_restverdiencapaciteit + arbeidsverplichtingen + voorschotten_systematiek + consequenties_bijverdienen + hoogte_verandert_tijd + herlevingsrecht_na_uitstroom')
+formula_pm_beleid = as.formula('complexiteit ~ life + aantal_inkomstenbronnen + woonvorm + woning + oplmet + nettoink + Agreeableness + Conscientiousness + Extraversion + Neuroticism + OpennessExperience + stapeling + inkomenstoets + gebaseerd_dagloon + vermogenstoets  + verrekening_gebruik_restverdiencapaciteit + arbeidsverplichtingen + voorschotten_systematiek + consequenties_bijverdienen + hoogte_verandert_tijd + herlevingsrecht_na_uitstroom')
+formula_fe = as.formula('complexiteit ~ inkomenstoets + gebaseerd_dagloon + vermogenstoets  + verrekening_gebruik_restverdiencapaciteit + arbeidsverplichtingen + voorschotten_systematiek + consequenties_bijverdienen + hoogte_verandert_tijd + herlevingsrecht_na_uitstroom + life')
+
+```
+
+## Inleiding
+
+Deze bijlage hoort bij het IBO Vereenvoudiging Sociale Zekerheid als toelichting bij de analyse van de enquête over ervaren complexiteit van sociale zekerheid. Deze enquête is uitgezet over het Langlopende Internet Studies voor de Sociale wetenschappen (LISS) panel. Middels dit onderzoek proberen we in kaart te brengen hoe complex regelingen ervaren worden, en de verschillen in ervaren complexiteit te verklaren.
+
+In de rest van het document wordt de volgende structuur gevolgd:
+
+1.  Data
+
+2.  Methoden
+
+    a\. Complexiteitsscore
+
+    b\. Regressies
+
+3.  Resultaten
+
+4.  Appendix
+
+```{r opzetten libraries en data inladen, echo=FALSE, message = FALSE, warning = FALSE}
+##TO DO:
+
+#CODE:
+# - Aantal observaties per voorwaarde
+# - Model fit toevoegen
+# - Plots met fit van complexiteit maken
+# - Voorwaarden fixen (inkomenstoets - vermogenstoets - partnerinkomenstoets)
+
+#TEXT:
+# - Titels gelijk maken
+
+#inladen data 
+df <- read_sav("data/L_IBO_socialezekerheid_rapport_2.0p.sav") %>% 
+  pivot_questions() %>% #deze functie pivot de data zodat je per respondent, per regeling een aparte regel krijgt, ipv alleen per respondent
+  persoonskenmerken_toevoegen() %>% 
+  beleidsaspecten_koppelen()
+
+```
+
+## Data
+
+In deze enquête is gevraagd naar de ervaring van gebruikers van sociale zekerheid. De enquête is uitgezet onder 1266 personen; de enquête is ingevuld door 994 respondenten. Dat is een response rate van ongeveer 80%. Elke respondent heeft vragen over 1 tot 3 regelingen beantwoord. In onze dataset hebben wij informatie per respondent, per regeling waar zij vragen over beantwoord hebben. Dit levert ons ongeveer tweeduizend responses op.
+
+```{r}
+#hoeveel regelingen er zijn beantwoord
+df %>% group_by(nomem_encr) %>% summarise(aantal_regelingen_beantwoord = n()) %>% group_by(aantal_regelingen_beantwoord) %>% summarise(n = n()) %>% 
+  rename(`Aantal regelingen waar de respondent vragen over heeft beantwoord` = aantal_regelingen_beantwoord,
+         `Aantal observaties` = n) %>% 
+  formattable()
+
+```
+
+```{r}
+hoeveel_obs_regeling = df %>% group_by(regeling) %>% summarise(n = n()) %>% arrange(desc(n)) %>% 
+  rename('Regeling' = 'regeling',
+         'Aantal observaties' = 'n')
+formattable(hoeveel_obs_regeling)
+
+```
+
+REPRESENTATIVITEIT
+
+## Methode
+
+Ten eerste wordt één complexiteitsindicator berekend, per persoon per regeling, tussen 0 en 10.
+
+Vervolgens worden verschillende modellen gebruikt om de variatie in ervaren complexiteit te verklaren. Hier worden grofweg twee categorieën aan variabelen gebruikt als verklarende variabelen: (1) persoonskenmerken en (2) voorwaarden in de verschillende regelingen. Hiermee proberen wij in kaart te brengen welke factoren bijdragen aan ervaren complexiteit.
+
+Eerst wordt de complexiteitsindicator nader toegelicht; vervolgens wordt een overzicht gegeven van de verschillende modellen waarmee wij de ervaren complexiteit pogen te verklaren.
+
+### Complexiteitsindicator
+
+In de enquête zijn meerdere vragen met betrekking tot ervaren complexiteit gesteld. De antwoorden op deze vragen zijn samengenomen tot één complexiteitsindicator met behulp van een Principal Component Analysis.
+
+In verband met beperkte non-response zijn er een aantal observaties die we niet volledig kunnen meenemen.
+
+```{r}
+#NAs laten zien
+correlation_matrix <- cor(df[,3:10], use = "pairwise.complete.obs")
+pca <- principal(correlation_matrix, rotate = "varimax", nfactors = 1)
+df$complexiteit_unscaled <- predict(pca, data = df[,3:10])[,1]
+df = df %>% 
+  mutate(
+    complexiteit = (max(complexiteit_unscaled, na.rm = T) - complexiteit_unscaled)/
+      (max(complexiteit_unscaled, na.rm = T) - min(complexiteit_unscaled, na.rm = T))*10) %>% 
+  select(-complexiteit_unscaled)
+
+df %>% summarise(NAs = sum(is.na(complexiteit))) %>% formattable()
+
+
+```
+
+Dit zijn de volgende vragen:
+
+1.  Het kostte weinig moeite om te ontdekken dat ik recht had op deze regeling.
+
+2.  Het kostte veel moeite om deze regeling aan te vragen.
+
+3.  Toen ik de regeling eenmaal had aangevraagd, heb ik er zonder problemen gebruik van gemaakt.
+
+4.  Het was vooraf moeilijk om te begrijpen wat de hoogte van de uitkering zou worden.
+
+5.  Het was vooraf moeilijk om te begrijpen hoe lang de uitkering zou worden.
+
+6.  Ik kon alle informatie die ik wilde weten over deze regeling makkelijk vinden.
+
+7.  Ik kon goed terecht met alle vragen die ik over deze regeling had.
+
+8.  De communicatie over deze regeling vond ik onduidelijk.
+
+Dit doen wij met een principal component analysis (PCA); deze methode is een *dimensionality-reduction* methode. PCA poogt maximale variatie van een grotere set variabelen te verklaren met een kleinere set variabelen.
+
+Als eerste berekenen we de correlatie matrix tussen de verschillende vragen, om in kaart te brengen hoe sterk de variabelen samenhangen. Een positieve waarde betekent dat de twee vragen positief met elkaar samenhangen: dus als de respondent het met deze vraag eens is, is deze respondent het waarschijnlijk ook meer eens met de andere vraag. Een negatieve waarde betekent dat de twee vragen negatief met elkaar samenhangen: als de respondent het met deze vraag eens is, is de respondent het waarschijnlijk meer oneens met de andere vraag.
+
+```{r}
+correlation_matrix <- cor(df[,3:10], use = "pairwise.complete.obs")
+cm = as.data.frame(correlation_matrix)
+names(cm) = c('Het kostte weinig moeite om te ontdekken dat ik recht had op deze regeling.',
+                   'Het kostte veel moeite om deze regeling aan te vragen.',
+                   'Toen ik de regeling eenmaal had aangevraagd, heb ik er zonder problemen gebruik van gemaakt.',
+                   'Het was vooraf moeilijk om te begrijpen wat de hoogte van de uitkering zou worden.',
+                   'Het was vooraf moeilijk om te begrijpen hoe lang de uitkering zou worden.',
+                   'Ik kon alle informatie die ik wilde weten over deze regeling makkelijk vinden.',
+                   'Ik kon goed terecht met alle vragen die ik over deze regeling had.',
+                   'De communicatie over deze regeling vond ik onduidelijk.')
+rownames(cm) = c('Het kostte weinig moeite om te ontdekken dat ik recht had op deze regeling.',
+                   'Het kostte veel moeite om deze regeling aan te vragen.',
+                   'Toen ik de regeling eenmaal had aangevraagd, heb ik er zonder problemen gebruik van gemaakt.',
+                   'Het was vooraf moeilijk om te begrijpen wat de hoogte van de uitkering zou worden.',
+                   'Het was vooraf moeilijk om te begrijpen hoe lang de uitkering zou worden.',
+                   'Ik kon alle informatie die ik wilde weten over deze regeling makkelijk vinden.',
+                   'Ik kon goed terecht met alle vragen die ik over deze regeling had.',
+                   'De communicatie over deze regeling vond ik onduidelijk.')
+
+
+names(cm) = c('Vraag 1', 'Vraag 2', 'Vraag 3', 'Vraag 4', 'Vraag 5', 'Vraag 6', 'Vraag 7', 'Vraag 8')
+rownames(cm) = c('Vraag 1', 'Vraag 2', 'Vraag 3', 'Vraag 4', 'Vraag 5', 'Vraag 6', 'Vraag 7', 'Vraag 8')
+cm[,1:8] = round(cm[,1:8], 2)
+formattable(cm)
+```
+
+In deze controle zien wij logische verbanden: tussen positief verwoordde vragen zijn positieve verbanden, tussen negatief verwoordde vragen zijn positieve verbanden, tussen positief en negatief verwoordde vragen zijn negatieve verbanden. Dat betekent dat op het gemiddelde de vragen consistent beantwoord zijn.
+
+Als tweede kijken we naar hoeveel principal components nodig zijn. Het is ook mogelijk om bijvoorbeeld twee principal-components te maken; de tweede moet dan wel meer informatie toevoegen voor de toegenomen complexiteit van het model. Dit kunnen wij doen met een scree-plot. We gebruiken 8 vragen, dus het onderstaande plot kijkt voor elke hoeveelheid principal components hoeveel extra variatie hiermee verklaard wordt.
+
+```{r stap 1 pca - correlation matrix en screeplot, echo = F, message = F, warning = F}
+pca_graph <- prcomp(df[,3:10] %>% na.omit(), scale = TRUE)
+ 
+# compute total variance
+variance = pca_graph$sdev^2 / sum(pca_graph$sdev^2)
+ 
+# Scree plot
+qplot(c(1:8), variance) +
+  geom_line() +
+  geom_point(size=1)+
+  xlab("Aantal Principal Components") +
+  ylab("Verklaarde Variatie") +
+  ggtitle("Scree Plot") +
+  ylim(0, 1)
+
+
+```
+
+Op basis van bovenstaand screeplot kunnen we stellen dat één principal-component de meest variatie al verklaard, met additionele principal-components wordt marginaal meer variatie verklaard. Dat betekent dat wij één samengestelde complexiteitsindicator kunnen maken van deze set vragen. Met deze complexiteitsscore kunnen we 50% van de variatie in de antwoorden op deze vragen verklaren.
+
+Onderstaand worden de coëfficiënten van de gebruikte vragen weergegeven. De coëfficiënten van negatief verwoorde vragen zijn negatief, en vice versa. Dit betekent dat de individuele vragen op een intuïtieve manier bijdragen aan de principal component.
+
+```{r pca runnen en coefficienten, echo = F, message = F, warning = F}
+pca <- principal(correlation_matrix, rotate = "varimax", nfactors = 1)
+pca_coefficients <- as.data.frame(matrix(pca$loadings)) %>% 
+  mutate(Vraag = c('Het kostte weinig moeite om te ontdekken dat ik recht had op deze regeling.',
+                   'Het kostte veel moeite om deze regeling aan te vragen.',
+                   'Toen ik de regeling eenmaal had aangevraagd, heb ik er zonder problemen gebruik van gemaakt.',
+                   'Het was vooraf moeilijk om te begrijpen wat de hoogte van de uitkering zou worden.',
+                   'Het was vooraf moeilijk om te begrijpen hoe lang de uitkering zou worden.',
+                   'Ik kon alle informatie die ik wilde weten over deze regeling makkelijk vinden.',
+                   'Ik kon goed terecht met alle vragen die ik over deze regeling had.',
+                   'De communicatie over deze regeling vond ik onduidelijk.'), 
+         V1 = round(V1, 2)) %>% 
+  select(Vraag, Coëfficiënt = V1)
+formattable(pca_coefficients)
+```
+
+Voor een duidelijkere interpretatie herschalen wij hierna de complexiteitsscore. Voor elke regeling waar een respondent vragen over beantwoord heeft, gebruiken we de bovenstaande coëfficiënten om de samengestelde complexiteitsscore te berekenen. Vervolgens draaien we de schaal om, zodat een hogere score meer ervaren complexiteit betekent, en zetten we deze score op een schaal van 0 tot 10.
+
+Dat leidt tot de onderstaande verdeling van complexiteitsscores:
+
+```{r, echo = F, message = F, warning = F, message== F}
+df %>% filter(!is.na(complexiteit)) %>% ggplot(aes(x = complexiteit)) + geom_histogram(bins = 10) + theme_bw()
+
+formattable(
+  df %>% summarise(
+    `Eerste kwartiel` = round(quantile(df$complexiteit, 0.25, na.rm = T), 2),
+    `Mediaan` = round(median(df$complexiteit, na.rm = T), 2),
+    `Gemiddelde` = round(mean(df$complexiteit, na.rm = T), 2),
+    `Derde kwartiel` = round(quantile(df$complexiteit, 0.75, na.rm = T), 2),
+    `Missende waarden` = sum(is.na(df$complexiteit))
+  )
+)
+
+```
+
+SKEW UITLEGGEN
+
+### Regressie-modellen
+
+Met de complexiteitsscore kunnen wij pogen de variatie in complexiteit verklaren. Dit focussen wij op drie specifieke onderzoekssvragen:
+
+(1) Hoe verschilt ervaren complexiteit tussen regelingen?
+
+(2) Welk effect heeft de populatie van een regeling op de ervaren complexiteit?
+
+(3) Welk effect hebben voorwaarden uit het beleid op de ervaren complexiteit?
+
+#### Hoe verschilt ervaren complexiteit tussen regelingen?
+
+Hiervoor kijken wij naar de verdeling van scores tussen regelingen. Wij maken histogrammen per regelingen, en laten de gemiddelde scores zien. Deze scores geven een globaal beeld van de verhouding tussen regelingen.
+
+Echter, de populaties van regelingen zijn erg anders. Dat komt door het verschil in doelgroepen van regelingen en dit zien we terug in de populatiedata van het CBS. Hierdoor weten we niet of variatie komt door de doelgroep van de regeling. Dat leidt tot de volgende vraag die wij moeten beantwoorden, voordat we naar het effect van beleid kunnen kijken.
+
+#### Welk effect heeft de populatie van een regeling op de ervaren complexiteit?
+
+In de eerste analyse kijken wij naar hoe de verhoudingen tussen regelingen veranderen, als wij de gemiddelde scores corrigeren voor persoonskenmerken. Dat houdt in dat wij de complexiteitsscore voorspellen met persoonskenmerken, en vervolgens vergelijken we deze gecorrigeerde score met de eerste score die wij berekend hebben.
+
+Indien persoonskenmerken een belangrijke factor zijn, corrigeren wij de scores voor persoonskenmerken op twee manieren: (1) We gebruiken persoonskenmerken in de regressie. (2) We gebruiken fixed-effects in de regressie; dat betekent dat wij de gemiddelde respons van elke respondent gebruiken. Hierbij exploiteren wij het feit dat veel respondenten vragen over meerdere regelingen hebben ingevuld.
+
+Met deze correcties kunnen wij het effect van de doelgroep beter onderscheiden van het effect van beleid.
+
+#### Welk effect hebben voorwaarden uit het beleid op de ervaren complexiteit?
+
+Er is een lijst aan voorwaarden opgesteld, die op basis van de gedragseconomische perspectieven en gesprekken ervaren complexiteit kunnen verklaren. Voor elke regeling hebben wij gekeken of deze voorwaarden van toepassing zijn. Hier exploiteren wij de variatie in voorwaarden: bijv. *ceteris paribus* vergelijken wij regelingen met en zonder een inkomenstoets.
+
+Voor de regressies hebben we hier nog een aanpassing op. In verband met volledige overlap nemen we inkomenstoets, partnerinkomenstoets en kostendelernorm samen. Anders zouden unieke combinaties aan voorwaarden alleen de variatie tussen regelingen oppakken, in plaats van de variatie door voorwaarden. Dat leidt tot de volgende indeling:
+
+```{r}
+beleidsaspecten <- readxl::read_xlsx('data/voorwaarden_regelingen.xlsx', col_names = T) %>% select(-Partnerinkomenstoets) %>% formattable()
+
+
+```
+
+We kunnen nog in kaart brengen hoeveel observaties er per voorwaarde zijn:
+
+```{r}
+model_naive = lm(formula_fe, data = df)
+obs_per_voorwaarden_tellen() %>% recode_voorwaarden()  %>% filter(!is.na(Categorie))%>% 
+  formattable()
+```
+
+## Resultaten
+
+### Hoe verschilt de ervaren complexiteit tussen regelingen?
+
+Eerst kunnen we kijken naar de gemiddelde scores per regeling:
+
+```{r}
+mediaan = median(df$complexiteit, na.rm = T)
+df %>% group_by(regeling) %>% 
+  summarise(
+    Gemiddelde = round(mean(complexiteit, na.rm = T), 2),
+    `Aantal respondenten` = n(),
+    Mediaan = round(median(complexiteit, na.rm = T), 2),
+    x = sum(complexiteit > mediaan, na.rm = T)) %>% 
+  ungroup() %>% 
+  mutate(`Percentage respondenten die de regeling bovengemiddeld complex vinden` = scales::percent(x/`Aantal respondenten`)) %>% 
+  rename('Regeling' = regeling) %>%
+  select(Regeling, Gemiddelde, Mediaan, `Percentage respondenten die de regeling bovengemiddeld complex vinden`, `Aantal respondenten`) %>% 
+  arrange(Gemiddelde) %>% 
+  formattable()
+```
+
+We kunnen een vrij duidelijk verschil zien in hoe regelingen gemiddeld gescoord wordt. De AOW en Kinderbijslag worden veel eenvoudiger gevonden dan andere regelingen, terwijl alle arbeidsongeschiktheidsuitkeringen en de Bijstand als significant complexer worden gezien.
+
+We kunnen per regeling kijken naar hoe de complexiteitsscores zijn verdeeld. Dit geeft een beeld van de variatie binnen regelingen. We zien dat binnen de regelingen de score vrij normaal verdeeld zijn.
+
+```{r complexiteit histogram per regeling, echo = F, message = F, warning = F}
+df %>% ggplot(aes(x = complexiteit)) + geom_histogram(bins  = 10) + facet_wrap(~ regeling)
+```
+
+### Welke persoonskenmerken beïnvloeden ervaren complexiteit?
+
+De bovenstaande tabel kunnen wij corrigeren voor persoonskenmerken - wij voorspellen de complexiteitsscore met de persoonskenmerken van de populatie.
+
+```{r tabel complexiteit per regeling, echo = F, message = F, warning = F}
+
+#Model met persoonskenmerken gebruiken om de complexiteit voor persoonskenmerken te kunnen corrigeren.
+model_pm <- lm(data= df, formula_pm)
+df$complexiteit_pm <- predict(model_pm, df)
+df$error_pm <- df$complexiteit - df$complexiteit_pm
+
+df %>% group_by(regeling) %>% 
+  summarise(
+    `Aantal respondenten` = n(),
+    Gemiddelde = round(mean(complexiteit, na.rm = T), 2),
+    `Gemiddelde, gecorrigeerd voor persoonskenmerken` = round(mean(complexiteit_pm, na.rm = T), 2),
+    Verschil = Gemiddelde - `Gemiddelde, gecorrigeerd voor persoonskenmerken`) %>% 
+  arrange(Gemiddelde) %>% 
+  formattable()
+
+```
+
+Aan de boven- en onderkant van de complexiteitsscores maakt het corrigeren voor persoonskenmerken het meest uit: bij de AOW onderschatten we de complexiteit en bij de WGA overschatten we de complexiteit van regelingen, als we de persoonskenmerken niet meenemen. Er zit dus een selectie-effect in deze analyse: het verschil in doelgroepen verklaart een deel van de variatie tussen regelingen, maar zeker niet alles.
+
+```{r, echo = F, message = F}
+pm_summ = data.frame(tidy(model_pm))[,c(1,2,5)] %>% mutate(across(estimate:p.value, ~ round(., 2))) 
+
+pm_summ %>% recode_regression_tables_pm() %>% 
+    formattable(list(
+    Persoonskenmerk = formatter("span", style = ~ style(color = ifelse(p.value < 0.05, 
+                                                                  "red", 
+                                                                  "black"),
+                                                   font.weight = "bold"))))
+
+pm_summ %>% recode_regression_tables_pm() %>% 
+  filter(Persoonskenmerk != "Constante") %>% 
+  mutate(Persoonskenmerk = paste(Persoonskenmerk, Categorie, sep = " - ")) %>% 
+  select(-Categorie) %>% 
+  mutate(col = ifelse(p.value < 0.05, 'Red', 'Grey')) %>% 
+  ggplot(aes(x = reorder(Persoonskenmerk, estimate), y = estimate, fill = col)) + 
+  geom_col() + 
+  coord_flip() + 
+  scale_fill_identity() +
+  labs(x = "Voorwaarden")
+```
+
+Er zijn een aantal persoonskenmerken die significant effect hebben op de ervaren complexiteit. De interpretatie van de desbetreffende coëfficienten is als volgt:
+
+-   Moeilijke omstandigheden in het leven: Wij hebben mensen gevraagd of zij moeilijke omstandigheden in het leven hadden tijdens het gebruik van de desbetreffende regeling. De antwoorden hebben wij als numeriek gecodeerd, maar waren van origine op een vijfpuntsschaal (Heel weinig - Weinig - Niet veel, niet weinig - Veel - Heel veel). Elke stap omhoog in deze schaal betekent dat mensen de regeling ongeveer 0.4 complexer vinden.
+
+-   Woonvorm: deze coëfficiënten zijn in vergelijking met de referentie-categorie Alleenstaande, zonder kind(eren). Dat betekent dat alleenstaande, met kind(eren) regelingen gemiddeld 0.5 minder complex ervaren dan alleenstaande, zonder kind(eren).
+
+    Verder ervaren mensen met een andere woonvorm de regelingen als ongeveer 0.9 minder complex dan alleenstaande, zonder kind(eren).
+
+-   Opleidingsniveau: deze coëfficiënten zijn in vergelijking met de referentie-categorie: Basisonderwijs. Dat betekent dat mensen die Havo/vwo hebben afgerond een regeling gemiddeld 0.6 minder complex ervaren dan mensen met afgerond basisonderwijs.
+
+-   Neuroticisme: de coëfficient is 0.22. Dat betekent dat als iemand (*ceteris paribus*) één punt omhoog gaat op de schaal van 1 tot 5, iemand de desbetreffende regeling 0.22 complexer ervaart op de complexiteitsscore.
+
+De R2 van dit model is 0.167. Dat betekent dat dit model 16,7% van de variatie in de afhankelijke variabele verklaart. Dat betekent dat er nog +/- 83% variatie is om te verklaren met voorwaarden.
+
+Dit zijn de persoonskenmerken die uit het OLS model als significant komen. Deze resultaten betekenen ook dat correctie voor persoonskenmerken belangrijk is om de resultaten over de effecten van voorwaarden correct te interpreteren.
+
+### Welk effect hebben voorwaarden uit beleid op ervaren complexiteit?
+
+De modellen corrigeren voor persoonskenmerken op 3 mogelijke manieren:
+
+1.  Variabelen met betrekking tot persoonskenmerken én voorwaarden worden meegenomen.
+2.  De afhankelijke variabel is al gecorrigeerd voor persoonskenmerken. Variabelen met betrekking tot voorwaarden worden meegenomen in de regressie.
+3.  Fixed effects wordt gebruikt om te corrigeren voor persoonskenmerken. Variabelen met betrekking tot voorwaarden worden meegenomen in de regressie.
+
+Op basis van de voorwaarden in tabel PM wordt geschat welke voorwaarden de ervaren complexiteit verklaren.
+
+Deze voorwaarden worden gebruikt om, gecorrigeerd voor de populatie van een regeling, te voorspellen welke voorwaarden per persoon complexiteit verklaren. We gebruiken individuele antwoorden over complexiteit, om de variatie tussen regelingen te verklaren.
+
+Als eerst kunnen wij echter kijken naar in hoeverre het aantal voorwaarden overeenkomt met de ervaren complexiteit.
+
+```{r, echo = F, message = F, warning = F}
+voorwaarden_vs_ervaren = df %>% group_by(regeling) %>% summarise(complexiteit = mean(complexiteit, na.rm = T),
+                                        aantal_voorwaarden = mean(aantal_voorwaarden, na.rm = T))
+
+ggplot(data = voorwaarden_vs_ervaren, aes(y = complexiteit, x = aantal_voorwaarden)) + 
+  geom_point() + 
+  geom_smooth(method = "lm")
+
+```
+
+Deze plot laat zien dat het niet lineair overeenkomt. Er zijn bijvoorbeeld meerdere regelingen (IVA, Wajong, Kinderopvangtoeslag) die op basis van het aantal voorwaarden relatief eenvoudig lijken, maar als veel complexer ervaren worden. Dit suggereert mogelijk dat voorwaarden niet gelijk bijdragen aan ervaren complexiteit. Daarom is het belangrijk om te kijken naar de bijdrage van verschillende voorwaarde aan de ervaren complexiteit.
+
+### Model met alleen voorwaarden
+
+Ten eerste kunnen we kijken naar een model zonder enige correctie voor persoonskenmerken, als *naïeve* vergelijking. Hierbij gebruiken wij de voorwaarden als onafhankelijke variabelen, en daarbij gebruiken wij ook de variabel over of een gebruiker moeilijke omstandigheden in hun leven had tijdens het gebruik van de regeling.
+
+```{r, echo = F, message = F, warning = F}
+model_naive = lm(formula_fe, data = df)
+naive_summ = data.frame(tidy(model_naive))[,c(1,2,5)] %>% mutate(across(estimate:p.value, ~ round(., 2))) 
+
+naive_summ %>% recode_regression_tables_beleid() %>% 
+    formattable(list(
+    Voorwaarde = formatter("span", style = ~ style(color = ifelse(p.value < 0.05, 
+                                                                  "red", 
+                                                                  "black"),
+                                                   font.weight = "bold"))))
+```
+
+Echter, in dit model zit nog geen correctie voor persoonskenmerken.
+
+### Vergelijking van modellen
+
+Hier vergelijken we de vier modellen: de naïve vergelijking en de drie verschillende modellen om te corrigeren voor de populatie. Onderstand kijken we naar de bandbreedte van de coëfficiënten en het aantal modellen in welke de variabelen significant zijn.
+
+```{r, echo = F, message = F, warning = F}
+model_pm_beleid <- lm(data = df, formula_pm_beleid)
+model_beleid <- lm(data = df, formula_beleid)
+model_fe <- plm(data = df, 
+                formula_fe,
+                model = "within",
+                index = "nomem_encr")
+
+modellen <- modellen_beleid_vergelijken() %>% mutate(Verschil = `Hoogste coëfficiënt` - `Laagste coëfficiënt`)
+
+modellen %>% recode_regression_tables_beleid() %>% arrange(desc(`Significantie in # modellen`)) %>% 
+  formattable(list(
+    Voorwaarde = formatter("span", style = ~ style(color = ifelse(`Significantie in # modellen` > 2, 
+                                                                  "red", 
+                                                                  "black"),
+                                                   font.weight = "bold"))))
+
+modellen %>%
+  ggplot(aes(y = `Hoogste coëfficiënt`, x = `Laagste coëfficiënt`)) + geom_point() + geom_smooth(method = "lm")
+
+
+```
+
+We zien dat de laagste en hoogste coëfficiënt van elke voorwaarde ongeveer binnen de bandbreedte blijven. Er lijkt tussen de meest extreme modellen een consistent verschil in schatting.
+
+De volgende voorwaarde zijn significant in alle modellen waar de variabel in gebruikt is. De interpretatie is ceteris paribus, dat houdt in dat alle andere variabelen constant gehouden worden en vervolgens de coëfficiënt van de variabel berekend wordt.
+
+-   Verrekenen van bijverdiensten [Deels / met uitzonderingen]: Deze variabel vergelijkt de ervaren complexiteit van het deels / met uitzonderingen verrekenen van bijverdiensten met het helemaal niet verrekenen van bijverdiensten. Respondenten ervaren regelingen met het deels / met uitzonderingen verrekenen van bijverdiensten als 0.69 - 0.99 complexer.
+-   Inkomenstoets [Ja]: Deze variabel vergelijkt de ervaren complexiteit van een inkomenstoets, ten opzichte van regelingen zonder inkomenstoets. Respondenten ervarne regelingen met een inkomentoets als 0.67 - 0.97 complexer dan regelingen zonder inkomenstoets.
+-   Verrekening van het gebruik van restverdiencapaciteit [Ja]: Deze variabel vergelijkt de ervaren complexiteit van respondenten in regelingen met verrekening van het gebruik van restverdiencapaciteit met respondenten in regelingen zonder deze verrekening. Respondenten vinden regelingen met verrekening van het gebruik van restverdiencapaciteit 0.49 - 0.73 punt complexer.
+-   Voorschottensystematiek [Ja]: Deze variabel vergelijkt de ervaren complexiteit van respondenten in regelingen met en zonder voorschottensystematiek. Respondenten ervaren regelingen met voorschottensystematiek als 0.37 - 0.56 complexer.
+-   Moeilijke omstandigheden in het leven [vijfpuntsschaal]: Deze variabel is een antwoord op een vijfpuntsschaal. Per stap op de schaal ervaart de respondent de regeling als 0.28 - 0.35 complexer. Dit effect kan dus oplopen tot ongeveer 1.5 punt.
+
+NB 1: Bij alle significante coëfficienten blijft tussen de laagste en hoogste coëfficiënt de coëfficient dezelfde richting op staan. De effecten kantelen dus niet in verschillende modellen.
+
+NB 2: Bij de variabel 'moeilijke omstandigheden in het leven' is deze maar in drie modellen meegenomen. Dat komt omdat deze in het model dat in de afhankelijke variabel voor persoonskenmerken corrigeert, niet meegenomen kan worden. De variabel zit daar al in de correctie voor persoonskenmerken.
+
+Onderstaand rapporteren we nog de R2 en de MSE (Mean Squared Error), om een beeld te geven van hoeveel variantie verklaard kan worden door voorwaarden uit beleid.
+
+```{r}
+data.frame(
+  Modellen = c(
+    'Model met alleen voorwaarden',
+    'Model met persoonskenmerken en voorwaarden',
+    'Model met correctie voor persoonskenmerken in afhankelijke variabel',
+    'Fixed effects'),
+  `R2` = c(
+    round(summary(model_naive)$r.squared, 2),
+    round(summary(model_pm_beleid)$r.squared, 2),
+    round(summary(model_beleid)$r.squared, 2),
+    round(summary(model_fe)$r.squared[1], 2)),
+  MSE = c(round(mean(summary(model_naive)$residuals^2), 2),
+          round(mean(summary(model_pm_beleid)$residuals^2), 2),
+          round(mean(summary(model_beleid)$residuals^2), 2),
+          round(mean(summary(model_fe)$residuals^2), 2)
+          )
+  )
+
+```
+
+### Conclusies
+
+De conclusies uit de bovenstaande analyse - onder voorbehoud van de gemaakte aannames - zijn: - Er zit grote variatie tussen de ervaren complexiteit van regelingen. De AOW en Kinderbijslag worden als relatief veel minder complex ervaren, terwijl de Bijstand, WGA, IVA en Wajong als relatief complex ervaren worden. - Persoonskenmerken spelen een rol in deze verschillen uitvergroten, maar verklaren uiteindelijk ongeveer 15% van de variantie in onze complexiteitsindicator. De significante variabelen zijn zijn woonvorm, opleidingsniveau, neuroticisme en het hebben van moeilijke omstandigheden in het leven tijdens het gebruik van de regeling. - Er zijn een aantal voorwaarden die consistent in de modellen als belangrijke verklaringen voor ervaren complexiteit gevonden worden. Dit zijn: inkomenstoets, verrekenen van bijverdiensten, verrekenen van het gebruik van restverdiencapaciteit, en voorschottensystematiek. De eerste twee komen het meest consistent uit de modellen, met de hoogste coëfficiënten.
+
+## Appendix:
+
+### A1: Zijn de resultaten gedreven door één regeling?
+
+```{r, echo = F, message = F, warning = F}
+shuffle_alles <- make_table_shuffling_regression('alles')
+shuffle_summary = shuffle_alles %>% 
+  mutate_if(is.logical, ~ ifelse(. == TRUE, 1, 0)) %>% 
+  select(-R2, -MSE, -ends_with('value')) %>% pivot_longer(cols = arbeidsverplichtingenJa_coef:voorschotten_systematiekJa_sign,
+                                                                                     names_to = c('aspect', 'indic'),
+                                                                                     names_pattern = '(.*)_(.*)') %>% 
+  pivot_wider(names_from = indic, values_from =value) %>% 
+  group_by(aspect) %>% 
+  summarise(
+    min_excluded_reg = excluded_regeling[which.min(coef)],
+    min = round(min(coef, na.rm = T), 2),
+    min_sig = sign[which.min(coef)],
+    max_excluded_reg = excluded_regeling[which.max(coef)],
+    max = round(max(coef, na.rm = T), 2),
+    max_sig = sign[which.max(coef)],
+    median = round(median(coef, na.rm = T), 2),
+    median_sig = sign[which(median(coef, na.rm = T) == coef)][1],
+    significant = sum(sign == 1, na.rm = T),
+    coef_fe = round(coef[excluded_regeling == "fixed_effects"], 2),
+    sign_fe = sign[excluded_regeling == "fixed_effects"],
+    n = sum(!is.na(coef))) %>% 
+  mutate(median_sig = ifelse(is.na(median_sig) & significant/n > 0.50, 1, median_sig),
+         median_sig = ifelse(is.na(median_sig) & significant/n < 0.50, 0, median_sig))
+
+
+shuffle_summary %>% select(term = aspect, significant, min, max, median, coef_fe) %>% 
+  recode_regression_tables_beleid() %>% 
+  arrange(desc(significant)) %>%
+  rename(`Significantie in # modellen` = significant,
+         `Laagste coëfficiënt` = min,
+         `Hoogste coëfficiënt` = max,
+         `Mediane coëfficiënt` = median,
+         `Fixed effects coëfficiënt` = coef_fe) %>% 
+  formattable()
+
+shuffle_summary %>% select(term = aspect, median, median_sig) %>% 
+  recode_regression_tables_beleid() %>% 
+  mutate(Voorwaarde = paste(Voorwaarde, Categorie, sep = " - ")) %>% 
+  select(-Categorie) %>% 
+  filter(!is.na(median)) %>% 
+  mutate(median_sig = ifelse(median_sig == 1, "Red", "Grey")) %>% 
+  rename(Mediaan = median,
+         `Significantie van mediaan` = median_sig) %>% 
+  ggplot(aes(x = reorder(Voorwaarde, Mediaan), y = Mediaan, fill = `Significantie van mediaan`)) + 
+  geom_col() + 
+  coord_flip() + 
+  scale_fill_identity() +
+  labs(x = "Voorwaarden")
+
+```
+
+Bovenstaand zien we dat de eerder genoemde significante voorwaarden ook in de meeste modellen signifcant zijn.
+
+### A2: RandomForest model
+
+We gebruiken een random forest model om non-lineaire verbanden in kaart te brengen. Een random forest model maakt allerlei beslisbomen (in ons geval 100) en maakt splitsingen die zo goed mogelijk verschillen in de ervaren complexiteit verklaren. Hiermee kan dit model interacties en non-lineaire verbanden meenemen.
+
+We gebruiken eerst een cross-validatie om de parameters van het random forest model te kiezen. Vervolgens passen we deze parameter toe op een random forest model.
+
+Eerst rapporteren we de 'Variable Importance' plot. Deze geeft aan welke variabelen het meest prominent zijn in het maken van nuttige splitsingen.
+
+```{r}
+#Random Forest ####
+set.seed(123456)
+sample <- sample(c(T, F), nrow(df), replace = T, prob = c(0.75, 0.25))
+train = df[sample,]
+test = df[!sample,]
+grid_rf = expand.grid(mtry = c(1:50))
+
+rf_cv <- train(formula_beleid, 
+              data = train,
+              method = 'rf',
+              tunegrid = grid_rf,
+              trControl = trainControl(method = 'cv', number = 5),
+              na.action = na.omit)
+
+#Uitkomst: optimale hoeveelheid mtry is 6.
+
+rf <- randomForest(formula_beleid, ntree = 100, mtry = 6, na.action = na.omit, data = df)
+varImpPlot(rf, main = "Variable Importance van voorwaarden")
+
+#partialPlot(rf, x.var = inkomenstoets, pred.data = data.frame(df))
+#partialPlot(rf, x.var = gebaseerd_dagloon, pred.data = data.frame(df))
+#partialPlot(rf, x.var = vermogenstoets, pred.data = data.frame(df))
+#partialPlot(rf, x.var = verrekening_gebruik_restverdiencapaciteit, pred.data = data.frame(df))
+#partialPlot(rf, x.var = arbeidsverplichtingen, pred.data = data.frame(df))
+#partialPlot(rf, x.var = voorschotten_systematiek, pred.data = data.frame(df))
+#partialPlot(rf, x.var = consequenties_bijverdienen, pred.data = data.frame(df))
+#partialPlot(rf, x.var = hoogte_verandert_tijd, pred.data = data.frame(df))
+#partialPlot(rf, x.var = herlevingsrecht_na_uitstroom, pred.data = data.frame(df))
+#
+#
+#summarise_pdp <- function(){
+#  pdp1 = data.frame(partialPlot(rf, x.var = inkomenstoets, pred.data = data.frame(df)))
+#  pdp2 = partialPlot(rf, x.var = gebaseerd_dagloon, pred.data = data.frame(df))
+#  pdp3 = partialPlot(rf, x.var = vermogenstoets, pred.data = data.frame(df))
+#  pdp4 = partialPlot(rf, x.var = kostendelernorm_huishoudenstoets, pred.data = data.frame(df))
+#  pdp5 = partialPlot(rf, x.var = partnerinkomenstoets, pred.data = data.frame(df))
+#  pdp6 = partialPlot(rf, x.var = verrekening_gebruik_restverdiencapaciteit, pred.data = data.frame(df))
+#  pdp7 = partialPlot(rf, x.var = arbeidsverplichtingen, pred.data = data.frame(df))
+#  pdp8 = partialPlot(rf, x.var = voorschotten_systematiek, pred.data = data.frame(df))
+#  pdp9 = partialPlot(rf, x.var = consequenties_bijverdienen, pred.data = data.frame(df))
+#  pdp10 = partialPlot(rf, x.var = hoogte_verandert_tijd, pred.data = data.frame(df))
+#  pdp11 = partialPlot(rf, x.var = herlevingsrecht_na_uitstroom, pred.data = data.frame(df))
+#  
+#  
+#}
+
+```
+
+In de Variable Importance plot is te zien dat de variabelen inkomenstoets en het verrekenen van bijverdiensten de belangrijkste variabelen zijn. In mindere mate
+
+### A3: Grafieken van antwoorden, per regeling
+
+Onderstaand geven we nog de individuele resultaten van de vragen m.b.t. complexiteit weer.
+
+```{r, echo = F, message = F, warning = F}
+df_graphs = df %>% recode_vars_for_graphs()
+
+#tabellen voor export
+df_graphs %>% make_graph_regeling("complex1", "(Zeer) oneens") + ggtitle('Het kostte weinig moeite om  te ontdekken \ndat ik recht had op deze regeling.') 
+df_graphs %>% make_graph_regeling("complex2", "(Zeer) oneens") + ggtitle('Het kostte veel moeite om deze regeling aan te vragen.')
+df_graphs %>% make_graph_regeling("complex3", "(Zeer) eens") + ggtitle('Toen ik de regeling eenmaal had aangevraagd,\nheb ik er zonder problemen gebruik van gemaakt.')
+df_graphs %>% make_graph_regeling("comm1", "(Zeer) oneens") + ggtitle('Het was vooraf moeilijk om te begrijpen \nwat de hoogte van de uitkering zou worden.')
+df_graphs %>% make_graph_regeling("comm2", "(Zeer) oneens") + ggtitle('Het was vooraf moeilijk om te begrijpen \nhoe lang de uitkering zou duren.')
+df_graphs %>% make_graph_regeling("comm3", "(Zeer) oneens") + ggtitle('Ik kon alle informatie die ik wilde weten \nover deze regeling makkelijk vinden.')
+df_graphs %>% make_graph_regeling("comm4", "(Zeer) oneens") + ggtitle('Ik kon goed terecht met alle vragen \ndie ik over deze regeling had.')
+df_graphs %>% make_graph_regeling("comm5", "(Zeer) oneens") + ggtitle('De communicatie over deze regeling vond ik onduidelijk.')
+df_graphs %>% make_graph_regeling("life", "Heel veel") + ggtitle('Er speelden moeilijke dingen in mijn leven tijdens \nhet gebruik van deze regeling \n(bijv. zorg, echtscheiding, gezondheid, overlijden, etc.).')
+
+#df_graphs %>% make_graph_regeling("terugvordering", "Ja, meerdere keren") + ggtitle('Ik heb ooit een terugvordering gehad van deze #regeling.')
+#df_graphs %>% make_graph_regeling("voorspelbaar_inkomen", "Heel veel") 
+#df_graphs %>% make_graph_regeling("verplichtingen_kennen", "Heel veel") 
+#df_graphs %>% make_graph_regeling("werken_naast_regeling", "Heel veel") 
+#df_graphs %>% make_graph_regeling("meer_inkomen_werk", "Heel veel") 
+#df_graphs %>% make_graph_regeling("hulp_vinden_werk", "Heel veel") 
+#df_graphs %>% make_graph_regeling("bewust_niet_gebruik", "Nee")  + ggtitle('Bewust niet gebruik')
+#
+#excel_vragen <- list("Weinig_moeite_recht_ontdekken" = complex1,
+#                     "Veel_moeite_regeling_aanvragen" = complex2,
+#                     "Zonder_problemen_gebruik" = complex3, 
+#                     "Moeilijk_hoogte_uitkering" = comm1, 
+#                     "Hoelang_duurt_uitkering" = comm2,
+#                     "Makkelijk_alle_info_vinden" = comm3,
+#                     "Goed_terecht_met_vragen" = comm4,
+#                     "Onduidelijke communicatie" = comm5, 
+#                     "life_events" = life)
+#openxlsx::write.xlsx(excel_vragen, "Complexiteit.xlsx")
+
+```
+
+## Discussie
+
+Binnen deze analyse zijn er een paar beperkingen die belangrijk zijn mee te nemen in het evalueren van deze resultaten:
+
+1.  Data: de representatieve steekproef van de enquête bestaat uit 1000 respondenten, die grotendeels over meerdere regelingen vragen beantwoorden. Echter, voor een aantal regelingen is de steekproef te klein om veel over deze specifieke regelingen te zeggen.
+
+2.  Voorwaarden: wij hebben gekeken naar het effect van voorwaarden op de ervaren complexiteit van regelingen. Echter, niet alle voorwaarden zijn meegenomen. Dit heeft een statistische reden: met teveel voorwaarden is het risico dat ceteris paribus variatie in een voorwaarde eigenlijk de variatie van één regeling verklaard. Hierdoor hebben wij het gehouden op voorwaarden die door gesprekken met uitvoerders en gebruikers als mogelijk complex ervaren worden, en voldoende variatie bij is. Het is echter mogelijk dat wij hier een belangrijke voorwaarde gemist hebben.
